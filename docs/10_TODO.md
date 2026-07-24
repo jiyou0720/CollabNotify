@@ -6,6 +6,11 @@ Project : CollabNotify
 Version : 1.0
 Status : Draft
 
+> Historical roadmap: the checkboxes below preserve the original planning
+> baseline and are not the current implementation status. Phase 1–14 completion
+> and remaining optional improvements are recorded in `Changelog.md` and the
+> current guides listed in `all.md`.
+
 ---
 
 # 1. 목적

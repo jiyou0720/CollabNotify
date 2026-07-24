@@ -1,0 +1,22 @@
+services:
+  collabnotify:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: collabnotify
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      ENABLE_DISCORD_BOT: ${ENABLE_DISCORD_BOT:-true}
+      DATABASE_URL: ${DOCKER_DATABASE_URL:-sqlite:////app/data/collabnotify.db}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    ports:
+      - "8000:8000"
+    volumes:
+      - runtime_data:/app/data
+      - runtime_logs:/app/logs
+
+volumes:
+  runtime_data:
+  runtime_logs:
