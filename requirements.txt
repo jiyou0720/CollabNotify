@@ -1,0 +1,14 @@
+fastapi
+uvicorn
+discord.py
+sqlalchemy
+alembic
+pydantic
+python-dotenv
+pytest
+pytest-asyncio
+pytest-cov
+httpx
+black
+ruff
+isort

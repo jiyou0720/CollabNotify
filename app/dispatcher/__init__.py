@@ -1,0 +1,1 @@
+"""Event dispatching package."""
