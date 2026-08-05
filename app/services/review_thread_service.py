@@ -163,10 +163,11 @@ class ReviewThreadService:
                     discord_thread_id=str(thread.id),
                     title=title[:100],
                 )
-            if (
-                notification.service is ServiceType.CONFLUENCE
-                and notification.event_type == "page_created"
-            ):
+            # A page_updated event can be the first event CollabNotify ever sees for
+            # a legacy page. create_thread is only reached when no Page ID mapping
+            # exists, so attaching controls here backfills that missing review once
+            # without restarting reviews on later edits.
+            if notification.service is ServiceType.CONFLUENCE:
                 await self._send_document_controls(review.id, thread)
             else:
                 await self._discord_service.send_thread_message(

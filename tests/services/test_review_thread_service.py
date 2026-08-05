@@ -325,11 +325,11 @@ async def test_all_update_messages_are_sent_before_archive(
     """A multi-field Done update cannot archive before later activities."""
     service, discord_service, _thread = jira_timeline_service(db_session)
     operations: list[str] = []
-    discord_service.send_thread_message.side_effect = (
-        lambda *_args, **_kwargs: operations.append("message")
+    discord_service.send_thread_message.side_effect = lambda *_args, **_kwargs: (
+        operations.append("message")
     )
-    discord_service.set_thread_archived.side_effect = (
-        lambda *_args, **_kwargs: operations.append("archive")
+    discord_service.set_thread_archived.side_effect = lambda *_args, **_kwargs: (
+        operations.append("archive")
     )
 
     await service.append_activities(
@@ -407,6 +407,9 @@ async def test_missing_confluence_update_creates_thread(
     discord_service = Mock(spec=DiscordService)
     discord_service.create_channel_thread = AsyncMock(return_value=thread)
     discord_service.send_thread_message = AsyncMock()
+    controls_message = Mock(spec=discord.Message)
+    controls_message.id = 701
+    discord_service.send_thread_controls = AsyncMock(return_value=controls_message)
     service = ReviewThreadService(factory, discord_service)
 
     review = await service.process_notification(
@@ -424,6 +427,10 @@ async def test_missing_confluence_update_creates_thread(
     messages = [
         call.args[1] for call in discord_service.send_thread_message.await_args_list
     ]
-    assert REVIEW_CHECKLIST in messages
+    discord_service.send_thread_controls.assert_awaited_once()
+    controls_content = discord_service.send_thread_controls.await_args.args[1]
+    assert "문서 리뷰" in controls_content
+    assert "기준 설정 필요" in controls_content
+    assert REVIEW_CHECKLIST not in messages
     assert any("📝 문서 수정" in message for message in messages)
     assert all("버전 변경" not in message for message in messages)
