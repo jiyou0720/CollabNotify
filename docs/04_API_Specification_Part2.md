@@ -445,6 +445,7 @@ Retry
 | ------------------ | -- |
 | page_created       | O  |
 | page_updated       | O  |
+| page_deleted       | O  |
 | comment_created    | O  |
 | attachment_created | O  |
 
@@ -596,6 +597,7 @@ Uploader
 | ------------------ | --------------------------- |
 | page_created       | ConfluencePageHandler       |
 | page_updated       | ConfluencePageHandler       |
+| page_deleted       | ConfluencePageHandler       |
 | comment_created    | ConfluenceCommentHandler    |
 | attachment_created | ConfluenceAttachmentHandler |
 

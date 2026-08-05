@@ -26,6 +26,21 @@ class NotificationAction(BaseModel):
     url: AnyHttpUrl
 
 
+class NotificationActivity(BaseModel):
+    """One normalized external activity for an existing review thread."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    kind: str
+    before: str | None = None
+    after: str | None = None
+    actor: str | None = None
+    occurred_at: str | None = None
+    body: str | None = None
+    added: tuple[str, ...] = ()
+    removed: tuple[str, ...] = ()
+
+
 class Notification(BaseModel):
     """Normalized collaboration event before Discord rendering."""
 
@@ -37,7 +52,10 @@ class Notification(BaseModel):
     description: str
     fields: tuple[NotificationField, ...]
     actions: tuple[NotificationAction, ...] = ()
+    activities: tuple[NotificationActivity, ...] = ()
     external_resource_id: str | None = None
     review_action: str = "NONE"
     review_thread_title: str | None = None
+    parent_delivery: bool = True
+    parent_update: bool = False
     timestamp: datetime = Field(default_factory=lambda: datetime.now(UTC))

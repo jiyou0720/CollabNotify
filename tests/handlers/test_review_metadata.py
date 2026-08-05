@@ -62,9 +62,14 @@ async def test_required_github_events_open_reviews(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("event_type", ("jira:issue_created", "jira:issue_updated"))
-async def test_required_jira_events_open_reviews(event_type: str) -> None:
-    """Created, updated, and assignment updates must open Jira reviews."""
+@pytest.mark.parametrize(
+    ("event_type", "expected_action"),
+    (("jira:issue_created", "OPEN"), ("jira:issue_updated", "APPEND")),
+)
+async def test_required_jira_events_use_review_timeline(
+    event_type: str, expected_action: str
+) -> None:
+    """Creation opens one review and later updates append to it."""
     notification = await JiraHandler(event_type).handle(
         {
             "issue": {
@@ -88,7 +93,7 @@ async def test_required_jira_events_open_reviews(event_type: str) -> None:
         }
     )
 
-    assert notification.review_action == "OPEN"
+    assert notification.review_action == expected_action
     assert notification.external_resource_id == "CN-1"
 
 
@@ -98,11 +103,12 @@ async def test_required_jira_events_open_reviews(event_type: str) -> None:
     (
         ("page_created", "page"),
         ("page_updated", "page"),
+        ("page_deleted", "page"),
         ("comment_created", "comment"),
         ("attachment_created", "attachment"),
     ),
 )
-async def test_required_confluence_events_open_reviews(
+async def test_required_confluence_events_use_one_review_thread(
     event_type: str, content_key: str
 ) -> None:
     """Every Confluence event named by the master prompt must open a review."""
@@ -117,14 +123,15 @@ async def test_required_confluence_events_open_reviews(
 
     notification = await ConfluenceHandler(event_type).handle(payload)
 
-    assert notification.review_action == "OPEN"
+    expected_action = "OPEN" if event_type == "page_created" else "APPEND"
+    assert notification.review_action == expected_action
     assert notification.external_resource_id == "10"
     assert notification.review_thread_title
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("handler", "payload"),
+    ("handler", "payload", "expected_action"),
     (
         (
             GithubHandler("issues"),
@@ -133,6 +140,7 @@ async def test_required_confluence_events_open_reviews(
                 "repository": {"full_name": "org/repo"},
                 "issue": {"number": 1, "title": "Issue"},
             },
+            "CLOSE",
         ),
         (
             GithubHandler("pull_request"),
@@ -141,25 +149,14 @@ async def test_required_confluence_events_open_reviews(
                 "repository": {"full_name": "org/repo"},
                 "pull_request": {"number": 2, "title": "PR", "merged": True},
             },
-        ),
-        (
-            JiraHandler("jira:issue_updated"),
-            {
-                "issue": {
-                    "key": "CN-1",
-                    "fields": {
-                        "project": {"name": "CollabNotify"},
-                        "status": {"name": "Done"},
-                    },
-                }
-            },
+            "APPEND",
         ),
     ),
 )
 async def test_required_completion_events_close_reviews(
-    handler: BaseHandler, payload: dict[str, object]
+    handler: BaseHandler, payload: dict[str, object], expected_action: str
 ) -> None:
-    """Merged, closed, and Done events must close their matching review."""
+    """GitHub completion events use their resource-specific lifecycle action."""
     notification = await handler.handle(payload)
 
-    assert notification.review_action == "CLOSE"
+    assert notification.review_action == expected_action

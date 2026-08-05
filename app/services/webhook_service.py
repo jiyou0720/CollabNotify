@@ -29,7 +29,9 @@ from app.services.discord_service import DiscordService
 from app.services.embed_builder import EmbedBuilder
 from app.services.mapping_service import MappingService
 from app.services.notification_service import DiscordNotificationService
+from app.services.project_alias_service import ProjectAliasService
 from app.services.review_thread_service import ReviewThreadService
+from app.services.thread_manager import ThreadManager
 from database.session import session_scope
 
 
@@ -50,39 +52,59 @@ class NotificationCoordinator:
         discord_service: DiscordService,
         embed_builder: EmbedBuilder | None = None,
         retry_service: RetryService | None = None,
+        project_alias_service: ProjectAliasService | None = None,
+        thread_manager: ThreadManager | None = None,
     ) -> None:
         """Initialize runtime delivery dependencies."""
         self._session_factory = session_factory
         self._discord_service = discord_service
         self._embed_builder = embed_builder or EmbedBuilder()
         self._retry_service = retry_service or RetryService()
-        self._review_threads = ReviewThreadService(session_factory, discord_service)
+        self._project_aliases = project_alias_service or ProjectAliasService(
+            session_factory
+        )
+        self._review_threads: ThreadManager = thread_manager or ReviewThreadService(
+            session_factory, discord_service
+        )
         self._logger = logging.getLogger(__name__)
 
     async def deliver(
         self, notification: Notification, external_event_id: str | None
     ) -> bool:
         """Deliver one Notification, returning False for a duplicate event."""
-        project_name = self._project_name(notification)
+        external_name = self._external_project_identifier(notification)
+        alias = self._project_aliases.find_by_provider(
+            notification.service.value, external_name
+        )
+        if alias is None:
+            self._logger.warning(
+                "Project alias not configured; notification ignored: "
+                "provider=%s external_name=%s",
+                notification.service.value,
+                external_name,
+            )
+            return True
         with session_scope(self._session_factory) as session:
             projects = ProjectRepository(session)
             channels = ChannelRepository(session)
             mapping_service = MappingService(
-                projects,
                 channels,
                 UserRepository(session),
                 RoleRepository(session),
             )
             notifications = NotificationRepository(session)
-            project = projects.find_by_name(project_name, notification.service.value)
-            if project is None:
-                project = projects.find_managed(project_name)
-            if project is None:
-                raise InvalidConfigurationError(
-                    f"Project mapping not found: {project_name}."
+            project = projects.find_by_id(alias.project_id)
+            if project is None or project.service != "discord" or not project.enabled:
+                self._logger.warning(
+                    "Project alias target is unavailable; notification ignored: "
+                    "provider=%s external_name=%s project_id=%s",
+                    notification.service.value,
+                    external_name,
+                    alias.project_id,
                 )
+                return True
             channel_id = mapping_service.find_channel(
-                notification.service.value, project_name
+                notification.service.value, project.id
             )
             mention_content = self._mention_content(
                 notification, project.id, mapping_service
@@ -104,18 +126,37 @@ class NotificationCoordinator:
                 notifications,
             )
             try:
-                message = await delivery.send(
-                    channel_id,
-                    notification,
-                    project_id=project.id,
-                    external_event_id=external_event_id,
-                    content=mention_content,
-                    audit_log=audit_log,
-                )
+                message = None
+                if notification.parent_delivery:
+                    message = await delivery.send(
+                        channel_id,
+                        notification,
+                        project_id=project.id,
+                        external_event_id=external_event_id,
+                        content=mention_content,
+                        audit_log=audit_log,
+                    )
+                else:
+                    notifications.update_status(audit_log, "SUCCESS")
                 session.commit()
                 try:
+                    parent_embed = (
+                        self._embed_builder.build(notification)
+                        if notification.parent_update
+                        else None
+                    )
+                    parent_view = (
+                        self._embed_builder.build_view(notification)
+                        if notification.parent_update
+                        else None
+                    )
                     await self._review_threads.process_notification(
-                        notification, project.id, message
+                        notification,
+                        project.id,
+                        message,
+                        channel_id,
+                        parent_embed,
+                        parent_view,
                     )
                 except Exception as review_error:
                     ErrorRepository(session).save(
@@ -232,7 +273,7 @@ class NotificationCoordinator:
             )
 
     @staticmethod
-    def _project_name(notification: Notification) -> str:
+    def _external_project_identifier(notification: Notification) -> str:
         """Extract the service project identifier from normalized fields."""
         for name in (
             "Repository",

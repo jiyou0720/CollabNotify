@@ -18,6 +18,7 @@ def test_model_metadata_contains_all_documented_tables() -> None:
         "error_logs",
         "notification_logs",
         "projects",
+        "project_aliases",
         "review_statuses",
         "review_threads",
         "reviewer_mappings",

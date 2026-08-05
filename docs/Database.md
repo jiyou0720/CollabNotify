@@ -41,3 +41,19 @@ erDiagram
     PROJECTS ||--o{ USER_MAPPINGS : maps
     PROJECTS ||--o{ ROLE_MAPPINGS : maps
 ```
+
+## project_aliases
+
+| Column | Type | Constraint |
+| --- | --- | --- |
+| `id` | integer | primary key |
+| `project_id` | integer | foreign key to `projects.id`, cascade delete |
+| `provider` | string | required (`github`, `jira`, `confluence`) |
+| `external_name` | string | required |
+| `created_at` | datetime | required |
+| `updated_at` | datetime | required |
+
+`(provider, external_name)` is unique and `project_id` is indexed. Migration `0005`
+creates the table. It migrates legacy managed-project name routes only when the name
+identifies exactly one internal project; ambiguous rows require an administrator to
+register an explicit alias.

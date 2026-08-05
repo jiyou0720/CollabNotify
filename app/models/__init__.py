@@ -5,6 +5,7 @@ from app.models.channel import ChannelMapping
 from app.models.error_log import ErrorLog
 from app.models.notification import NotificationLog
 from app.models.project import Project
+from app.models.project_alias import ProjectAlias
 from app.models.review_status import ReviewStatus
 from app.models.review_thread import ReviewThread
 from app.models.reviewer_mapping import ReviewerMapping
@@ -18,6 +19,7 @@ __all__ = [
     "ErrorLog",
     "NotificationLog",
     "Project",
+    "ProjectAlias",
     "ReviewStatus",
     "ReviewThread",
     "ReviewerMapping",

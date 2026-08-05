@@ -9,13 +9,15 @@ from sqlalchemy.orm import Session
 
 from app.api.dependencies import get_event_dispatcher
 from app.core.enums import ServiceType
-from app.core.exceptions import DiscordApiError, InvalidConfigurationError
+from app.core.exceptions import DiscordApiError
+from app.models.project import Project
 from app.repositories.channel_repository import ChannelRepository
 from app.repositories.error_repository import ErrorRepository
 from app.repositories.notification_repository import NotificationRepository
+from app.repositories.project_alias_repository import ProjectAliasRepository
 from app.repositories.project_repository import ProjectRepository
+from app.repositories.review_thread_repository import ReviewThreadRepository
 from app.repositories.role_repository import RoleRepository
-from app.repositories.user_repository import UserRepository
 from app.schemas.common import Notification, NotificationField
 from app.services.discord_service import DiscordService
 from app.services.webhook_service import NotificationCoordinator, WebhookService
@@ -24,13 +26,22 @@ from database.session import create_session_factory
 
 def seed_mapping(
     session: Session, service: str, project_name: str, channel_id: str
-) -> None:
-    """Seed one project and Discord channel mapping."""
-    project = ProjectRepository(session).create(
-        project_name, service, f"{service}-{project_name}"
-    )
-    ChannelRepository(session).create(service, project.id, channel_id)
+) -> Project:
+    """Seed one alias and channel for a shared internal Discord project."""
+    projects = ProjectRepository(session)
+    project = projects.find_managed("Internal Project", 1)
+    if project is None:
+        project = projects.create(
+            "Internal Project",
+            "discord",
+            "discord:1:internal-project",
+            discord_guild_id="1",
+            discord_category_id="10",
+        )
+    ChannelRepository(session).set_channel(service, project.id, channel_id)
+    ProjectAliasRepository(session).create_alias(project.id, service, project_name)
     session.commit()
+    return project
 
 
 @pytest.mark.asyncio
@@ -98,6 +109,7 @@ async def test_all_services_reach_discord_and_audit_log(
         )
     assert len(logs) == 3
     assert {log.status for log in logs} == {"SUCCESS"}
+    assert len({log.project_id for log in logs}) == 1
 
 
 @pytest.mark.asyncio
@@ -128,18 +140,31 @@ async def test_duplicate_delivery_is_idempotent(db_session: Session) -> None:
 
 
 @pytest.mark.asyncio
-async def test_jira_comment_resolves_project_and_user_mention(
+async def test_jira_comment_appends_to_existing_issue_thread(
     db_session: Session,
 ) -> None:
     """Jira comments must retain project routing and mapped user mentions."""
-    seed_mapping(db_session, "jira", "CollabNotify", "102")
-    UserRepository(db_session).save_mapping("jira", "alice", "777")
+    project = seed_mapping(db_session, "jira", "CollabNotify", "102")
+    ReviewThreadRepository(db_session).create(
+        project_id=project.id,
+        service="jira",
+        event_type="jira:issue_created",
+        external_resource_id="CN-1",
+        discord_message_id="901",
+        discord_thread_id="902",
+        title="CN-1 토론",
+    )
     db_session.commit()
     factory = create_session_factory(db_session.get_bind())
     message = Mock(spec=discord.Message)
     message.id = 902
     discord_service = Mock(spec=DiscordService)
     discord_service.send_embed = AsyncMock(return_value=message)
+    thread = Mock(spec=discord.Thread)
+    thread.id = 902
+    discord_service.get_thread.return_value = thread
+    discord_service.send_thread_message = AsyncMock()
+    discord_service.create_thread = AsyncMock()
     get_event_dispatcher.cache_clear()
     service = WebhookService(
         get_event_dispatcher(), NotificationCoordinator(factory, discord_service)
@@ -149,18 +174,22 @@ async def test_jira_comment_resolves_project_and_user_mention(
         ServiceType.JIRA,
         "comment_created",
         {
-            "issue": {
-                "key": "CN-1",
-                "fields": {"project": {"name": "CollabNotify"}},
-                "self": "https://jira.example/rest/api/issue/CN-1",
-            },
-            "comment": {"body": "hello", "author": {"displayName": "alice"}},
+            "issueKey": "CN-1",
+            "projectName": "CollabNotify",
+            "issueUrl": "https://jira.example/browse/CN-1",
+            "commentAuthor": "alice",
+            "commentBody": "hello",
         },
         "jira-comment-1",
     )
 
     assert result.supported
-    assert discord_service.send_embed.await_args.args[3] == "<@777>"
+    discord_service.send_embed.assert_not_awaited()
+    discord_service.create_thread.assert_not_awaited()
+    content = discord_service.send_thread_message.await_args.args[1]
+    assert "💬 새 댓글" in content
+    assert "alice" in content
+    assert "hello" in content
 
 
 @pytest.mark.asyncio
@@ -198,9 +227,7 @@ async def test_notification_resolves_configured_role_mention(
     db_session: Session,
 ) -> None:
     """An explicit notification role must resolve to a safe Discord mention."""
-    seed_mapping(db_session, "github", "org/repo", "101")
-    project = ProjectRepository(db_session).find_by_name("org/repo", "github")
-    assert project is not None
+    project = seed_mapping(db_session, "github", "org/repo", "101")
     RoleRepository(db_session).create(project.id, "Backend", "888")
     db_session.commit()
     factory = create_session_factory(db_session.get_bind())
@@ -225,21 +252,10 @@ async def test_notification_resolves_configured_role_mention(
 
 
 @pytest.mark.asyncio
-async def test_managed_project_routing_rejects_cross_guild_ambiguity(
-    db_session: Session,
+async def test_missing_alias_is_logged_and_safely_ignored(
+    db_session: Session, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """A webhook must never choose arbitrarily between identically named guilds."""
-    projects = ProjectRepository(db_session)
-    for guild_id, channel_id in (("10", "101"), ("20", "102")):
-        project = projects.create(
-            "CollabNotify",
-            "discord",
-            f"discord:{guild_id}:collabnotify",
-            discord_guild_id=guild_id,
-            discord_category_id=f"{guild_id}0",
-        )
-        ChannelRepository(db_session).create("jira", project.id, channel_id, "jira")
-    db_session.commit()
+    """An unknown provider identifier must not raise or send a message."""
     discord_service = Mock(spec=DiscordService)
     discord_service.send_embed = AsyncMock()
     coordinator = NotificationCoordinator(
@@ -253,7 +269,263 @@ async def test_managed_project_routing_rejects_cross_guild_ambiguity(
         fields=(NotificationField(name="프로젝트", value="CollabNotify"),),
     )
 
-    with pytest.raises(InvalidConfigurationError):
-        await coordinator.deliver(notification, "jira-ambiguous-1")
+    assert await coordinator.deliver(notification, "jira-unmapped-1")
 
     discord_service.send_embed.assert_not_awaited()
+    assert "Project alias not configured" in caplog.text
+    assert "external_name=CollabNotify" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_jira_update_appends_once_to_existing_review_thread(
+    db_session: Session,
+) -> None:
+    """A duplicate Jira update appends once and never creates another thread."""
+    project = seed_mapping(db_session, "jira", "CollabNotify", "102")
+    ReviewThreadRepository(db_session).create(
+        project_id=project.id,
+        service="jira",
+        event_type="jira:issue_created",
+        external_resource_id="CN-1",
+        discord_message_id="900",
+        discord_thread_id="901",
+        title="CN-1 토론",
+    )
+    db_session.commit()
+    message = Mock(spec=discord.Message)
+    message.id = 902
+    thread = Mock(spec=discord.Thread)
+    thread.id = 901
+    discord_service = Mock(spec=DiscordService)
+    discord_service.send_embed = AsyncMock(return_value=message)
+    discord_service.get_thread.return_value = thread
+    discord_service.send_thread_message = AsyncMock()
+    discord_service.set_thread_archived = AsyncMock()
+    discord_service.create_thread = AsyncMock()
+    factory = create_session_factory(db_session.get_bind())
+    get_event_dispatcher.cache_clear()
+    service = WebhookService(
+        get_event_dispatcher(), NotificationCoordinator(factory, discord_service)
+    )
+    payload = {
+        "webhookEvent": "jira:issue_updated",
+        "user": {"displayName": "홍길동"},
+        "issue": {
+            "key": "CN-1",
+            "fields": {"project": {"name": "CollabNotify"}},
+        },
+        "changelog": {
+            "items": [
+                {
+                    "field": "priority",
+                    "fromString": "Medium",
+                    "toString": "High",
+                }
+            ]
+        },
+    }
+
+    first = await service.process(
+        ServiceType.JIRA, "jira:issue_updated", payload, "jira-update-1"
+    )
+    duplicate = await service.process(
+        ServiceType.JIRA, "jira:issue_updated", payload, "jira-update-1"
+    )
+
+    assert first.duplicate is False
+    assert duplicate.duplicate is True
+    discord_service.create_thread.assert_not_awaited()
+    discord_service.send_thread_message.assert_awaited_once()
+    assert "⚠️ 우선순위 변경" in discord_service.send_thread_message.await_args.args[1]
+    discord_service.edit_channel_message.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_github_pr_uses_one_thread_for_open_push_merge_and_duplicate(
+    db_session: Session,
+) -> None:
+    """PR lifecycle keeps one thread and only parent-delivers open and merge."""
+    seed_mapping(db_session, "github", "org/repo", "101")
+    factory = create_session_factory(db_session.get_bind())
+    parent_message = Mock(spec=discord.Message)
+    parent_message.id = 500
+    thread = Mock(spec=discord.Thread)
+    thread.id = 600
+    discord_service = Mock(spec=DiscordService)
+    discord_service.send_embed = AsyncMock(return_value=parent_message)
+    discord_service.create_thread = AsyncMock(return_value=thread)
+    discord_service.edit_channel_message = AsyncMock(return_value=parent_message)
+    discord_service.get_thread.return_value = thread
+    discord_service.send_thread_message = AsyncMock()
+    discord_service.set_thread_archived = AsyncMock()
+    get_event_dispatcher.cache_clear()
+    service = WebhookService(
+        get_event_dispatcher(), NotificationCoordinator(factory, discord_service)
+    )
+    base_pr = {
+        "number": 123,
+        "title": "Improve login",
+        "user": {"login": "author"},
+        "base": {"ref": "main"},
+        "head": {"ref": "feature"},
+        "merged": False,
+    }
+
+    opened = await service.process(
+        ServiceType.GITHUB,
+        "pull_request",
+        {
+            "action": "opened",
+            "repository": {"full_name": "org/repo"},
+            "sender": {"login": "author"},
+            "pull_request": base_pr,
+        },
+        "github-open-123",
+    )
+    push_payload = {
+        "action": "synchronize",
+        "repository": {"full_name": "org/repo"},
+        "sender": {"login": "author"},
+        "before": "a" * 40,
+        "after": "b" * 40,
+        "pull_request": {**base_pr, "commits": 1},
+        "commits": [
+            {
+                "id": "b" * 40,
+                "author": {"name": "author"},
+                "message": "Fix login",
+            }
+        ],
+    }
+    pushed = await service.process(
+        ServiceType.GITHUB,
+        "pull_request",
+        push_payload,
+        "github-push-123",
+    )
+    duplicate = await service.process(
+        ServiceType.GITHUB,
+        "pull_request",
+        push_payload,
+        "github-push-123",
+    )
+    merged_pr = {**base_pr, "merged": True}
+    merged = await service.process(
+        ServiceType.GITHUB,
+        "pull_request",
+        {
+            "action": "closed",
+            "repository": {"full_name": "org/repo"},
+            "sender": {"login": "merger"},
+            "pull_request": merged_pr,
+        },
+        "github-merge-123",
+    )
+
+    assert opened.supported and pushed.supported and merged.supported
+    assert duplicate.duplicate is True
+    assert discord_service.send_embed.await_count == 1
+    discord_service.create_thread.assert_awaited_once_with(
+        parent_message, "🧵 PR #123 리뷰", 1440
+    )
+    assert discord_service.edit_channel_message.await_count == 2
+    timeline_messages = [
+        call.args[1] for call in discord_service.send_thread_message.await_args_list
+    ]
+    push_messages = [
+        item for item in timeline_messages if "📦 새로운 코드가 Push되었습니다." in item
+    ]
+    assert len(push_messages) == 1
+    discord_service.set_thread_archived.assert_awaited_once_with(
+        600, archived=True, reason="CollabNotify GitHub PR 완료"
+    )
+    with factory() as session:
+        reviews = ReviewThreadRepository(session)
+        review = reviews.find_by_resource("github", "org/repo:pr:123")
+        assert review is not None
+        assert review.discord_thread_id == "600"
+        assert review.status == "COMPLETED"
+
+
+@pytest.mark.asyncio
+async def test_confluence_page_uses_one_parent_embed_and_thread(
+    db_session: Session,
+) -> None:
+    """Page updates, comments, and attachments reuse one parent and thread."""
+    seed_mapping(db_session, "confluence", "Development", "103")
+    factory = create_session_factory(db_session.get_bind())
+    parent_message = Mock(spec=discord.Message)
+    parent_message.id = 700
+    thread = Mock(spec=discord.Thread)
+    thread.id = 701
+    discord_service = Mock(spec=DiscordService)
+    discord_service.send_embed = AsyncMock(return_value=parent_message)
+    discord_service.create_thread = AsyncMock(return_value=thread)
+    discord_service.get_thread.return_value = thread
+    discord_service.send_thread_message = AsyncMock()
+    discord_service.edit_channel_message = AsyncMock(return_value=parent_message)
+    discord_service.set_thread_archived = AsyncMock()
+    get_event_dispatcher.cache_clear()
+    service = WebhookService(
+        get_event_dispatcher(), NotificationCoordinator(factory, discord_service)
+    )
+    base = {
+        "page": {"id": "10", "title": "Architecture"},
+        "space": {"name": "Development"},
+        "user": {"displayName": "Editor"},
+    }
+
+    await service.process(ServiceType.CONFLUENCE, "page_created", base, "cf-created-10")
+    await service.process(
+        ServiceType.CONFLUENCE,
+        "page_updated",
+        {
+            **base,
+            "page": {
+                "id": "10",
+                "title": "Architecture",
+                "version": {"number": 2},
+            },
+        },
+        "cf-updated-10",
+    )
+    await service.process(
+        ServiceType.CONFLUENCE,
+        "comment_created",
+        {**base, "comment": {"body": "검토 의견"}},
+        "cf-comment-10",
+    )
+    await service.process(
+        ServiceType.CONFLUENCE,
+        "attachment_created",
+        {**base, "attachment": {"title": "diagram.png", "fileSize": 2048}},
+        "cf-attachment-10",
+    )
+    await service.process(
+        ServiceType.CONFLUENCE,
+        "page_deleted",
+        base,
+        "cf-deleted-10",
+    )
+
+    discord_service.send_embed.assert_awaited_once()
+    discord_service.create_thread.assert_awaited_once()
+    discord_service.edit_channel_message.assert_awaited_once()
+    messages = [
+        call.args[1] for call in discord_service.send_thread_message.await_args_list
+    ]
+    assert any("📝 문서 수정" in item for item in messages)
+    assert all("버전 변경" not in item for item in messages)
+    assert any("💬 새 댓글" in item for item in messages)
+    assert any("📎 첨부파일 추가" in item for item in messages)
+    assert any("문서가 삭제되었습니다." in item for item in messages)
+    discord_service.set_thread_archived.assert_awaited_once_with(
+        701,
+        archived=True,
+        reason="CollabNotify Confluence 문서 삭제",
+    )
+    with factory() as session:
+        review = ReviewThreadRepository(session).find_by_resource("confluence", "10")
+        assert review is not None
+        assert review.discord_thread_id == "701"
+        assert review.status == "COMPLETED"

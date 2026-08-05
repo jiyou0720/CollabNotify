@@ -1,5 +1,19 @@
 # Changelog
 
+## Confluence Activity Timeline
+
+- Added complete Page ID-based Thread reuse for page updates, comments, and attachments.
+- Added `page_deleted` timeline notification and automatic Thread archival.
+- Added native webhook and Automation actor, timestamp, version, title, storage-body,
+  and content-link normalization.
+- Documented the Confluence Automation body and operational lifecycle.
+- Formalized the shared `ThreadManager` contract and reused its create, find, post,
+  and archive operations across GitHub, Jira, and Confluence.
+- Fixed Jira Automation comments so flat issue-key, author, and body fields append to
+  the existing issue thread without parent delivery.
+- Added Confluence `fullName`, `publicName`, scalar version, Automation date, native
+  epoch date, space-key, and account-ID metadata fallbacks.
+
 ## Production audit
 
 - Added bounded streaming for webhook request bodies, ambiguous cross-guild

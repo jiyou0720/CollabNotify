@@ -9,7 +9,7 @@ creates persistent review threads for actionable events.
 - FastAPI webhook endpoints with HMAC/shared-secret verification and duplicate
   delivery protection.
 - Korean Discord embeds and slash-command UI.
-- `/project` lifecycle and channel mapping administration.
+- `/project` lifecycle and external provider alias administration.
 - Automatic review threads, checklists, five review states, and completion
   archiving.
 - Persistent SQLite/SQLAlchemy state managed exclusively by Alembic.
@@ -295,3 +295,81 @@ Discord Bot만 단독 실행하려면 다음 명령을 사용한다.
 ```powershell
 python -m app.main
 ```
+## 외부 프로젝트 별칭 연결
+
+CollabNotify의 Discord 프로젝트명은 GitHub 저장소명, Jira 프로젝트명 또는
+Confluence 공간명과 같을 필요가 없습니다. Discord에서 서버 관리자 권한으로 다음
+명령을 실행해 외부 식별자를 내부 프로젝트에 연결합니다.
+
+```text
+/project alias add provider:GitHub external_name:organization/repository project_name:내부 프로젝트명
+/project alias add provider:Jira external_name:CollabNotify project_name:내부 프로젝트명
+/project alias add provider:Confluence external_name:Development project_name:내부 프로젝트명
+/project alias list
+```
+
+별칭을 삭제하려면
+`/project alias remove provider:<서비스> external_name:<외부 식별자>`를 실행합니다.
+GitHub의 외부 이름은 대소문자 구분 없이 저장·조회되며, Jira와 Confluence는 실제
+웹훅 payload의 이름을 그대로 입력해야 합니다. 별칭이 없는 웹훅은 HTTP 요청을
+실패시키지 않고 경고 로그만 남긴 뒤 Discord 전송을 건너뜁니다.
+
+## Jira Activity Timeline
+
+Jira 이슈 생성 시 만들어진 리뷰 스레드는 해당 이슈의 전체 활동 기록으로
+사용됩니다. 이후 이슈의 상태, 담당자, 우선순위, 제목, 설명, 라벨, 해결 상태 변경과
+댓글 생성·수정·삭제가 이슈 키로 조회된 동일 스레드에 한국어 메시지로 추가됩니다.
+새 스레드는 이슈 생성 이벤트에서만 만들며, 매핑된 스레드가 없으면 경고 로그를
+남기고 활동을 건너뜁니다.
+
+상태가 `Done`, `Closed` 또는 `완료`가 되면 완료 메시지를 게시하고 스레드를
+보관합니다. 완료 상태에서 다른 상태로 변경되면 기존 스레드를 자동으로 다시 열고
+작업 재개 메시지를 게시합니다. Jira Automation은 중복 전송 방지를 위해 각 요청에
+고유한 `X-Request-ID` 헤더를 포함해야 합니다.
+
+## GitHub PR Activity Timeline
+
+Pull Request가 열릴 때 생성된 리뷰 스레드는 해당 PR의 단일 협업 공간으로 계속
+사용됩니다. PR 편집, 새 commit push, 리뷰 요청, 리뷰 결과, 리뷰 댓글, 일반 댓글,
+라벨·담당자·Draft 상태 변경을 모두 같은 스레드에 한국어 메시지로 기록합니다.
+`synchronize`는 commit마다 메시지를 보내지 않고 commit 수, 짧은 SHA, 작성자와
+commit 메시지 첫 줄을 하나의 요약 메시지로 게시합니다.
+
+PR이 merge되지 않은 채 종료되면 기존 부모 embed를 `🔒 PR 종료`, merge되면
+`✅ PR 병합` 상태로 수정한 뒤 기존 스레드를 보관합니다. PR을 다시 열면 동일
+스레드의 보관을 해제하고 `♻️ PR가 다시 열렸습니다.`를 게시합니다. GitHub의
+`X-GitHub-Delivery`가 중복 webhook의 타임라인 재게시를 방지합니다.
+
+## 통합 Thread Lifecycle
+
+GitHub PR, Jira Issue, Confluence Page는 모두 다음 정책을 사용합니다.
+
+```text
+최초 생성 → 부모 embed 1개 + Discord thread 1개
+상태 변경 → 기존 부모 embed 수정
+활동 발생 → 기존 thread에만 추가
+완료       → 부모 embed 수정 + thread 완료 기록 + 보관
+재개       → 기존 thread 복원
+```
+
+댓글·push·첨부파일 같은 활동은 부모 채널에 새 메시지를 만들지 않습니다. 과거
+버전에서 생성되어 부모 메시지를 찾을 수 없는 thread는 경고를 남기되 timeline
+기록을 계속 처리합니다.
+
+## Confluence 문서 타임라인
+
+`page_created`는 `#confluence` 채널에 스페이스·제목·작성자·생성 시각·버전·문서
+링크를 포함한 Teal Embed를 게시하고 Thread 하나를 만듭니다. Page ID와 부모 메시지
+ID, Thread ID는 `review_threads`에 저장됩니다. 이후 `page_updated`,
+`comment_created`, `attachment_created`는 새 부모 메시지나 Thread를 만들지 않고
+Page ID로 기존 Thread를 찾아 활동을 누적합니다. `page_deleted`는
+`🗑 문서가 삭제되었습니다.`를 게시한 후 같은 Thread를 자동 보관합니다.
+
+Confluence Automation 요청은 [Webhook Guide](docs/Webhook_Guide.md)의 JSON 예시처럼
+`eventType`, `page.id`, `space.name`, 사용자, 시각과 버전을 명시적으로 전달해야
+합니다. 후속 이벤트에 Page ID가 빠지면 기존 Thread를 찾을 수 없습니다.
+
+GitHub, Jira, Confluence의 Thread 생성·조회·게시·보관은 공통 `ThreadManager`
+인터페이스와 `ReviewThreadService` 구현을 사용합니다. 새 provider는 webhook을
+`Notification`으로 정규화하고 동일한 lifecycle 메타데이터만 제공하면 이 구조를
+재사용할 수 있습니다.

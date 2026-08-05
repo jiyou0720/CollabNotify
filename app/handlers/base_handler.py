@@ -9,7 +9,12 @@ from typing import Any
 
 from app.core.enums import ServiceType
 from app.core.exceptions import PayloadValidationError
-from app.schemas.common import Notification, NotificationAction, NotificationField
+from app.schemas.common import (
+    Notification,
+    NotificationAction,
+    NotificationActivity,
+    NotificationField,
+)
 
 type Payload = Mapping[str, Any]
 
@@ -57,6 +62,9 @@ class BaseHandler(ABC):
         external_resource_id: str | None = None,
         review_action: str = "NONE",
         review_thread_title: str | None = None,
+        activities: tuple[NotificationActivity, ...] = (),
+        parent_delivery: bool = True,
+        parent_update: bool = False,
     ) -> Notification:
         """Build a normalized immutable Notification."""
         actions: tuple[NotificationAction, ...] = ()
@@ -77,6 +85,9 @@ class BaseHandler(ABC):
             external_resource_id=external_resource_id,
             review_action=review_action,
             review_thread_title=review_thread_title,
+            activities=activities,
+            parent_delivery=parent_delivery,
+            parent_update=parent_update,
         )
 
     @staticmethod
@@ -101,7 +112,14 @@ class BaseHandler(ABC):
     def user_name(value: object) -> str:
         """Extract a displayable external username."""
         if isinstance(value, Mapping):
-            for key in ("displayName", "name", "login", "username"):
+            for key in (
+                "displayName",
+                "fullName",
+                "publicName",
+                "name",
+                "login",
+                "username",
+            ):
                 candidate = value.get(key)
                 if isinstance(candidate, str) and candidate:
                     return candidate

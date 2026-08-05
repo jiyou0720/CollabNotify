@@ -17,6 +17,7 @@ from app.config.settings import BotConfig
 from app.services.administration_service import AdministrationService
 from app.services.channel_service import ChannelService
 from app.services.discord_service import DiscordService
+from app.services.project_alias_service import ProjectAliasService
 from app.services.project_management_service import ProjectManagementService
 from app.services.review_thread_service import ReviewThreadService
 
@@ -45,7 +46,10 @@ class DiscordClient(discord.Client):
             discord_service = DiscordService(self.channel_service)
             administration_service = AdministrationService(session_factory)
             self.tree.add_command(
-                ProjectCommandGroup(ProjectManagementService(session_factory))
+                ProjectCommandGroup(
+                    ProjectManagementService(session_factory),
+                    ProjectAliasService(session_factory),
+                )
             )
             self.tree.add_command(
                 ReviewCommandGroup(

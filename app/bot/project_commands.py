@@ -11,9 +11,105 @@ from app.bot.checks import require_guild, server_manager_only
 from app.bot.error_handling import respond_to_command_error
 from app.bot.views import DeleteConfirmationView
 from app.models.project import Project
+from app.services.project_alias_service import ProjectAliasService
 from app.services.project_management_service import ProjectManagementService
 
 logger = logging.getLogger(__name__)
+
+
+class ProjectAliasCommandGroup(
+    app_commands.Group,
+    name="alias",
+    description="외부 서비스 프로젝트 별칭을 관리합니다.",
+):
+    """Expose Korean project alias management commands."""
+
+    def __init__(self, service: ProjectAliasService) -> None:
+        super().__init__()
+        self._service = service
+
+    @app_commands.command(name="add", description="외부 프로젝트 별칭을 등록합니다.")
+    @app_commands.describe(
+        provider="외부 서비스",
+        external_name="외부 서비스에서 사용하는 프로젝트 식별자",
+        project_name="연결할 Discord 내부 프로젝트명",
+    )
+    @app_commands.choices(
+        provider=[
+            app_commands.Choice(name="GitHub", value="github"),
+            app_commands.Choice(name="Jira", value="jira"),
+            app_commands.Choice(name="Confluence", value="confluence"),
+        ]
+    )
+    @server_manager_only
+    async def add(
+        self,
+        interaction: discord.Interaction,
+        provider: app_commands.Choice[str],
+        external_name: str,
+        project_name: str,
+    ) -> None:
+        """Register one provider identifier for an internal project."""
+        guild = require_guild(interaction)
+        alias = self._service.create_alias(
+            guild.id, provider.value, external_name, project_name
+        )
+        await interaction.response.send_message(
+            (
+                f"**{alias.provider} / {alias.external_name}** 별칭을 "
+                f"**{alias.project_name}** 프로젝트에 연결했습니다."
+            ),
+            ephemeral=True,
+        )
+
+    @app_commands.command(name="remove", description="외부 프로젝트 별칭을 삭제합니다.")
+    @app_commands.describe(
+        provider="외부 서비스",
+        external_name="삭제할 외부 프로젝트 식별자",
+    )
+    @app_commands.choices(
+        provider=[
+            app_commands.Choice(name="GitHub", value="github"),
+            app_commands.Choice(name="Jira", value="jira"),
+            app_commands.Choice(name="Confluence", value="confluence"),
+        ]
+    )
+    @server_manager_only
+    async def remove(
+        self,
+        interaction: discord.Interaction,
+        provider: app_commands.Choice[str],
+        external_name: str,
+    ) -> None:
+        """Remove one provider identifier alias."""
+        guild = require_guild(interaction)
+        removed = self._service.delete_alias(guild.id, provider.value, external_name)
+        message = (
+            "외부 프로젝트 별칭을 삭제했습니다."
+            if removed
+            else "삭제할 외부 프로젝트 별칭이 없습니다."
+        )
+        await interaction.response.send_message(message, ephemeral=True)
+
+    @app_commands.command(name="list", description="외부 프로젝트 별칭을 표시합니다.")
+    @server_manager_only
+    async def list_aliases(self, interaction: discord.Interaction) -> None:
+        """List every alias owned by the current Discord guild."""
+        guild = require_guild(interaction)
+        aliases = self._service.find_all(guild.id)
+        embed = discord.Embed(
+            title="외부 프로젝트 별칭",
+            color=discord.Color.blue(),
+            description=(
+                "\n".join(
+                    f"• **{item.provider} / {item.external_name}** → "
+                    f"{item.project_name}"
+                    for item in aliases
+                )
+                or "등록된 외부 프로젝트 별칭이 없습니다."
+            ),
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
 class ProjectCommandGroup(
@@ -23,9 +119,14 @@ class ProjectCommandGroup(
 ):
     """Expose managed project operations as Korean slash commands."""
 
-    def __init__(self, service: ProjectManagementService) -> None:
+    def __init__(
+        self,
+        service: ProjectManagementService,
+        alias_service: ProjectAliasService,
+    ) -> None:
         super().__init__()
         self._service = service
+        self.add_command(ProjectAliasCommandGroup(alias_service))
 
     @app_commands.command(name="create", description="새 프로젝트 공간을 생성합니다.")
     @app_commands.describe(project_name="생성할 프로젝트명")
@@ -164,50 +265,6 @@ class ProjectCommandGroup(
             inline=False,
         )
         await interaction.response.send_message(embed=embed, ephemeral=True)
-
-    @app_commands.command(name="map", description="서비스 알림 채널을 연결합니다.")
-    @app_commands.describe(
-        project_name="프로젝트명",
-        service="채널 종류: github, jira, confluence 등",
-        channel="연결할 텍스트 채널",
-    )
-    @server_manager_only
-    async def map_channel(
-        self,
-        interaction: discord.Interaction,
-        project_name: str,
-        service: str,
-        channel: discord.TextChannel,
-    ) -> None:
-        """Create or replace one channel mapping."""
-        guild = require_guild(interaction)
-        self._service.map_channel(guild.id, project_name, service, channel)
-        await interaction.response.send_message(
-            (
-                f"**{project_name}**의 **{service.lower()}** 알림을 "
-                f"{channel.mention}에 연결했습니다."
-            ),
-            ephemeral=True,
-        )
-
-    @app_commands.command(
-        name="unmap", description="서비스 알림 채널 연결을 해제합니다."
-    )
-    @app_commands.describe(project_name="프로젝트명", service="연결을 해제할 채널 종류")
-    @server_manager_only
-    async def unmap_channel(
-        self,
-        interaction: discord.Interaction,
-        project_name: str,
-        service: str,
-    ) -> None:
-        """Delete one channel mapping."""
-        guild = require_guild(interaction)
-        removed = self._service.unmap_channel(guild.id, project_name, service)
-        message = (
-            "채널 연결을 해제했습니다." if removed else "해제할 채널 연결이 없습니다."
-        )
-        await interaction.response.send_message(message, ephemeral=True)
 
     async def on_error(
         self, interaction: discord.Interaction, error: app_commands.AppCommandError

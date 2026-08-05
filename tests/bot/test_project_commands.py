@@ -24,12 +24,19 @@ def test_project_commands_are_registered_in_korean(db_session: Session) -> None:
         "restore",
         "list",
         "info",
-        "map",
-        "unmap",
+        "alias",
     }
+    alias_group = next(command for command in group.commands if command.name == "alias")
+    assert {command.name for command in alias_group.commands} == {
+        "add",
+        "remove",
+        "list",
+    }
+    assert all(command.checks for command in alias_group.commands)
     assert all(
         any("가" <= char <= "힣" for char in command.description)
         for command in group.commands
+        if not hasattr(command, "commands")
     )
 
     review_group = client.tree.get_command("review")
@@ -73,7 +80,11 @@ def test_project_commands_are_registered_in_korean(db_session: Session) -> None:
     for group_name in ("project", "admin", "settings", "test"):
         group = client.tree.get_command(group_name)
         assert group is not None
-        assert all(command.checks for command in group.commands)
+        assert all(
+            command.checks
+            for command in group.commands
+            if not hasattr(command, "commands")
+        )
     review_commands = {
         command.name: command for command in client.tree.get_command("review").commands
     }

@@ -33,6 +33,7 @@ def get_event_dispatcher() -> EventDispatcher:
         "issue_comment",
         "pull_request",
         "pull_request_review",
+        "pull_request_review_comment",
         "push",
         "release",
         "workflow_run",
@@ -50,6 +51,7 @@ def get_event_dispatcher() -> EventDispatcher:
     confluence_events = (
         "page_created",
         "page_updated",
+        "page_deleted",
         "comment_created",
         "attachment_created",
     )

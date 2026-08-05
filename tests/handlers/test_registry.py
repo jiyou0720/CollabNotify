@@ -14,6 +14,7 @@ def test_default_dispatcher_registers_every_documented_event() -> None:
             "issue_comment",
             "pull_request",
             "pull_request_review",
+            "pull_request_review_comment",
             "push",
             "release",
             "workflow_run",
@@ -31,6 +32,7 @@ def test_default_dispatcher_registers_every_documented_event() -> None:
         ServiceType.CONFLUENCE: (
             "page_created",
             "page_updated",
+            "page_deleted",
             "comment_created",
             "attachment_created",
         ),
