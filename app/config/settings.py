@@ -90,3 +90,36 @@ class WebhookConfig:
             jira_secret=values["JIRA_WEBHOOK_SECRET"],
             confluence_secret=values["CONFLUENCE_WEBHOOK_SECRET"],
         )
+
+
+@dataclass(frozen=True, slots=True)
+class ConfluenceConfig:
+    """Credentials for outbound Confluence Cloud API operations."""
+
+    base_url: str
+    email: str
+    api_token: str = field(repr=False)
+
+    @classmethod
+    def from_env(
+        cls,
+        env_file: str | Path = ".env",
+        environ: Mapping[str, str] | None = None,
+    ) -> ConfluenceConfig | None:
+        """Return configured credentials or None when outbound writes are disabled."""
+        if environ is None:
+            load_dotenv(dotenv_path=env_file)
+            environ = os.environ
+        base_url = environ.get("CONFLUENCE_BASE_URL", "").strip().rstrip("/")
+        email = environ.get("CONFLUENCE_EMAIL", "").strip()
+        api_token = environ.get("CONFLUENCE_API_TOKEN", "").strip()
+        if not any((base_url, email, api_token)):
+            return None
+        if not all((base_url, email, api_token)):
+            raise ValueError(
+                "CONFLUENCE_BASE_URL, CONFLUENCE_EMAIL and "
+                "CONFLUENCE_API_TOKEN must be configured together."
+            )
+        if not base_url.startswith("https://"):
+            raise ValueError("CONFLUENCE_BASE_URL must use HTTPS.")
+        return cls(base_url=base_url, email=email, api_token=api_token)

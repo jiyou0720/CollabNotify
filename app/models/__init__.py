@@ -1,11 +1,13 @@
 """Database model package."""
 
 from app.models.base import Base
+from app.models.change_request import ChangeRequest
 from app.models.channel import ChannelMapping
 from app.models.error_log import ErrorLog
 from app.models.notification import NotificationLog
 from app.models.project import Project
 from app.models.project_alias import ProjectAlias
+from app.models.review_completion import ReviewCompletion
 from app.models.review_status import ReviewStatus
 from app.models.review_thread import ReviewThread
 from app.models.reviewer_mapping import ReviewerMapping
@@ -16,11 +18,13 @@ from app.models.user_mapping import UserMapping
 __all__ = [
     "Base",
     "ChannelMapping",
+    "ChangeRequest",
     "ErrorLog",
     "NotificationLog",
     "Project",
     "ProjectAlias",
     "ReviewStatus",
+    "ReviewCompletion",
     "ReviewThread",
     "ReviewerMapping",
     "RoleMapping",

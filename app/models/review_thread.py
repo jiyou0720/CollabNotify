@@ -2,7 +2,7 @@
 
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, Index, String, UniqueConstraint
+from sqlalchemy import DateTime, ForeignKey, Index, Integer, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base, utc_now
@@ -30,6 +30,11 @@ class ReviewThread(Base):
     discord_thread_id: Mapped[str] = mapped_column(String, nullable=False, unique=True)
     title: Mapped[str] = mapped_column(String, nullable=False)
     status: Mapped[str] = mapped_column(String, default="IN_REVIEW", nullable=False)
+    required_review_count: Mapped[int | None] = mapped_column(Integer)
+    checklist_message_id: Mapped[str | None] = mapped_column(String)
+    last_page_version: Mapped[int | None] = mapped_column(Integer)
+    review_reminded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    change_reminded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, nullable=False
     )

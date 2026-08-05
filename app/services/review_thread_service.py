@@ -3,17 +3,22 @@
 from __future__ import annotations
 
 import logging
+import os
+from datetime import UTC, datetime, timedelta
 
 import discord
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
+from app.config.settings import ConfluenceConfig
 from app.core.enums import ServiceType
 from app.core.exceptions import ChannelNotFoundError, InvalidConfigurationError
 from app.models.review_thread import ReviewThread
 from app.repositories.review_thread_repository import ReviewThreadRepository
+from app.repositories.reviewer_repository import ReviewerRepository
 from app.repositories.setting_repository import SettingRepository
 from app.schemas.common import Notification, NotificationActivity
+from app.services.confluence_service import ConfluenceService
 from app.services.discord_service import DiscordService
 from database.session import session_scope
 
@@ -41,9 +46,18 @@ class ReviewThreadService:
         self,
         session_factory: sessionmaker[Session],
         discord_service: DiscordService,
+        confluence_service: ConfluenceService | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._discord_service = discord_service
+        config = ConfluenceConfig.from_env()
+        self._confluence = (
+            confluence_service
+            if confluence_service is not None
+            else ConfluenceService(config)
+            if config is not None
+            else None
+        )
         self._logger = logging.getLogger(__name__)
 
     async def process_notification(
@@ -138,7 +152,6 @@ class ReviewThreadService:
                 self._auto_archive_duration(),
             )
             source_message_id = str(thread.id)
-        await self._discord_service.send_thread_message(thread, REVIEW_CHECKLIST)
         try:
             with session_scope(self._session_factory) as session:
                 review = ReviewThreadRepository(session).create(
@@ -149,6 +162,15 @@ class ReviewThreadService:
                     discord_message_id=source_message_id,
                     discord_thread_id=str(thread.id),
                     title=title[:100],
+                )
+            if (
+                notification.service is ServiceType.CONFLUENCE
+                and notification.event_type == "page_created"
+            ):
+                await self._send_document_controls(review.id, thread)
+            else:
+                await self._discord_service.send_thread_message(
+                    thread, REVIEW_CHECKLIST
                 )
             for activity in notification.activities:
                 await self._append_activity(int(thread.id), activity)
@@ -216,6 +238,12 @@ class ReviewThreadService:
             and not self._is_done(final_status.after)
         ):
             await self.reopen_thread(service, resource_id)
+        if service == ServiceType.CONFLUENCE.value:
+            for activity in activities:
+                if activity.kind == "confluence_page_updated":
+                    await self.handle_document_updated(
+                        resource_id, activity.after, activity.actor
+                    )
         for activity in activities:
             await self._append_activity(thread_id, activity)
         if final_status is not None and self._is_done(final_status.after):
@@ -242,6 +270,423 @@ class ReviewThreadService:
                 reason="CollabNotify Confluence 문서 삭제",
             )
         return True
+
+    async def handle_document_updated(
+        self, page_id: str, version: str | None, actor: str | None
+    ) -> None:
+        """Mark open requests updated and mention their requesters for confirmation."""
+        try:
+            version_number = int(version) if version else None
+        except ValueError:
+            version_number = None
+        with session_scope(self._session_factory) as session:
+            repository = ReviewThreadRepository(session)
+            review = repository.find_by_resource(ServiceType.CONFLUENCE.value, page_id)
+            if review is None:
+                return
+            if version_number is not None:
+                if (
+                    review.last_page_version is not None
+                    and version_number <= review.last_page_version
+                ):
+                    return
+                review.last_page_version = version_number
+            requests = repository.list_change_requests(review.id, ("OPEN",))
+            for request in requests:
+                request.status = "UPDATED"
+                request.detected_page_version = version_number
+            review_id = review.id
+            thread_id = int(review.discord_thread_id)
+            requester_ids = list(
+                dict.fromkeys(item.requester_discord_id for item in requests)
+            )
+        if requester_ids:
+            thread = self._discord_service.get_thread(thread_id)
+            mentions = " ".join(f"<@{user_id}>" for user_id in requester_ids)
+            await self._discord_service.send_thread_controls(
+                thread,
+                f"🔔 {mentions}\n문서가 수정되었습니다"
+                + (f" (버전 {version_number})" if version_number else "")
+                + f". 변경 내용을 확인해주세요.\n수정자: {actor or '알 수 없음'}",
+                self.document_review_view(review_id),
+            )
+            await self.refresh_document_review(review_id)
+
+    async def send_due_reminders(self) -> int:
+        """Mention unfinished reviewers and unresolved requesters once per interval."""
+        now = datetime.now(UTC)
+        review_hours = max(1, int(os.getenv("REVIEW_REMINDER_HOURS", "48")))
+        change_hours = max(1, int(os.getenv("CHANGE_REQUEST_REMINDER_HOURS", "48")))
+        notifications: list[tuple[int, str, int]] = []
+        with session_scope(self._session_factory) as session:
+            repository = ReviewThreadRepository(session)
+            for review in repository.list_open():
+                if review.service != ServiceType.CONFLUENCE.value:
+                    continue
+                reviewers = ReviewerRepository(session).list_for_project(
+                    review.project_id
+                )
+                completed_ids = {
+                    item.discord_user_id
+                    for item in repository.list_completions(review.id)
+                }
+                unfinished = [
+                    item.discord_user_id
+                    for item in reviewers
+                    if item.discord_user_id not in completed_ids
+                ]
+                if (
+                    review.required_review_count
+                    and unfinished
+                    and now - self._aware(review.created_at)
+                    >= timedelta(hours=review_hours)
+                    and (
+                        review.review_reminded_at is None
+                        or now - self._aware(review.review_reminded_at)
+                        >= timedelta(hours=review_hours)
+                    )
+                ):
+                    mentions = " ".join(f"<@{user_id}>" for user_id in unfinished)
+                    notifications.append(
+                        (
+                            int(review.discord_thread_id),
+                            "⏰ 리뷰 리마인더\n"
+                            f"{mentions}\n"
+                            "아직 문서 리뷰가 완료되지 않았습니다.",
+                            review.id,
+                        )
+                    )
+                    review.review_reminded_at = now
+                open_requests = repository.list_change_requests(
+                    review.id, ("OPEN", "UPDATED")
+                )
+                overdue = [
+                    item
+                    for item in open_requests
+                    if now - self._aware(item.created_at)
+                    >= timedelta(hours=change_hours)
+                ]
+                if overdue and (
+                    review.change_reminded_at is None
+                    or now - self._aware(review.change_reminded_at)
+                    >= timedelta(hours=change_hours)
+                ):
+                    mentions = " ".join(
+                        f"<@{user_id}>"
+                        for user_id in dict.fromkeys(
+                            item.requester_discord_id for item in overdue
+                        )
+                    )
+                    notifications.append(
+                        (
+                            int(review.discord_thread_id),
+                            "⏰ 수정 요청 리마인더\n"
+                            f"{mentions}\n"
+                            "열린 수정 요청을 확인해주세요.",
+                            review.id,
+                        )
+                    )
+                    review.change_reminded_at = now
+        for thread_id, content, review_id in notifications:
+            thread = self._discord_service.get_thread(thread_id)
+            await self._discord_service.send_thread_controls(
+                thread, content, self.document_review_view(review_id)
+            )
+        return len(notifications)
+
+    def restore_document_review_views(self, client: discord.Client) -> int:
+        """Register persistent Views for active Confluence sessions after restart."""
+        count = 0
+        with session_scope(self._session_factory) as session:
+            for review in ReviewThreadRepository(session).list_open():
+                if review.service == ServiceType.CONFLUENCE.value:
+                    client.add_view(self.document_review_view(review.id))
+                    count += 1
+        return count
+
+    @staticmethod
+    def _aware(value: datetime) -> datetime:
+        return (
+            value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+        )
+
+    async def configure_document_review(
+        self, review_id: int, actor_id: int, required_count: int
+    ) -> None:
+        """Apply the human-selected one-person or three-person threshold."""
+        with session_scope(self._session_factory) as session:
+            repository = ReviewThreadRepository(session)
+            review = repository.find_by_id(review_id)
+            if review is None or review.service != ServiceType.CONFLUENCE.value:
+                raise InvalidConfigurationError("등록된 Confluence 리뷰가 아닙니다.")
+            self._require_reviewer(session, review, actor_id)
+            reviewers = ReviewerRepository(session).list_for_project(review.project_id)
+            if required_count == 3 and len(reviewers) < 3:
+                raise InvalidConfigurationError(
+                    "전체 팀 기준에는 활성 리뷰어가 최소 3명 필요합니다."
+                )
+            repository.configure(review, required_count)
+        await self.refresh_document_review(review_id)
+
+    async def complete_document_review(
+        self, review_id: int, user_id: int, display_name: str
+    ) -> bool:
+        """Idempotently record a reviewer, mirror it, and evaluate approval."""
+        with session_scope(self._session_factory) as session:
+            repository = ReviewThreadRepository(session)
+            review = self._require_document_review(repository, review_id)
+            self._require_reviewer(session, review, user_id)
+            if review.required_review_count is None:
+                raise InvalidConfigurationError("먼저 문서 리뷰 기준을 설정해주세요.")
+            completion, created = repository.add_completion(
+                review, user_id, display_name
+            )
+            page_id = review.external_resource_id
+            completed_at = completion.completed_at
+        if created and self._confluence is not None:
+            try:
+                comment_id = await self._confluence.add_comment(
+                    page_id,
+                    "[CollabNotify 리뷰 완료]\n"
+                    f"{display_name}님이 리뷰를 완료했습니다.\n"
+                    f"완료 시각: {completed_at.astimezone(UTC).isoformat()}",
+                )
+                with session_scope(self._session_factory) as session:
+                    completion = ReviewThreadRepository(session).list_completions(
+                        review_id
+                    )
+                    for item in completion:
+                        if item.discord_user_id == str(user_id):
+                            item.confluence_comment_id = comment_id
+                            break
+            except Exception:
+                self._logger.exception(
+                    "Confluence review comment synchronization failed"
+                )
+        await self.refresh_document_review(review_id)
+        await self._try_approve(review_id)
+        return created
+
+    async def create_change_request(
+        self,
+        review_id: int,
+        requester_id: int,
+        requester_name: str,
+        title: str,
+        body: str,
+        location: str | None,
+    ) -> None:
+        """Persist and mirror one Discord modal submission."""
+        with session_scope(self._session_factory) as session:
+            repository = ReviewThreadRepository(session)
+            review = self._require_document_review(repository, review_id)
+            self._require_reviewer(session, review, requester_id)
+            change = repository.create_change_request(
+                review, requester_id, requester_name, title, body, location
+            )
+            repository.update_status(
+                review, "CHANGES_REQUESTED", changed_by_discord_id=str(requester_id)
+            )
+            page_id = review.external_resource_id
+            request_id = change.id
+            thread_id = int(review.discord_thread_id)
+        comment_id = None
+        if self._confluence is not None:
+            try:
+                comment_id = await self._confluence.add_comment(
+                    page_id,
+                    f"[CollabNotify 수정 요청 CR-{request_id}]\n"
+                    f"요청자: {requester_name}\n"
+                    f"제목: {title}\n관련 위치: {location or '미지정'}\n\n{body}",
+                )
+            except Exception:
+                self._logger.exception(
+                    "Confluence change request synchronization failed"
+                )
+        thread = self._discord_service.get_thread(thread_id)
+        message = await self._discord_service.send_thread_controls(
+            thread,
+            f"📝 **수정 요청 CR-{request_id}**\n요청자: <@{requester_id}>\n"
+            f"제목: {title}\n위치: {location or '미지정'}\n\n{body}",
+            self.document_review_view(review_id),
+        )
+        with session_scope(self._session_factory) as session:
+            change = ReviewThreadRepository(session).find_change_request(request_id)
+            if change is not None:
+                change.confluence_comment_id = comment_id
+                change.discord_message_id = str(message.id)
+        await self.refresh_document_review(review_id)
+
+    async def resolve_latest_change_request(self, review_id: int, user_id: int) -> None:
+        """Resolve the latest updated request owned by the clicking user."""
+        with session_scope(self._session_factory) as session:
+            repository = ReviewThreadRepository(session)
+            self._require_document_review(repository, review_id)
+            requests = repository.list_change_requests(review_id, ("UPDATED", "OPEN"))
+            owned = [
+                item for item in requests if item.requester_discord_id == str(user_id)
+            ]
+            if not owned:
+                raise InvalidConfigurationError("확인할 본인의 수정 요청이 없습니다.")
+            repository.resolve_change_request(owned[-1])
+        await self.refresh_document_review(review_id)
+        await self._try_approve(review_id)
+
+    async def cancel_latest_change_request(self, review_id: int, user_id: int) -> None:
+        """Cancel the latest open request owned by the clicking user."""
+        with session_scope(self._session_factory) as session:
+            repository = ReviewThreadRepository(session)
+            self._require_document_review(repository, review_id)
+            requests = repository.list_change_requests(review_id, ("OPEN", "UPDATED"))
+            owned = [
+                item for item in requests if item.requester_discord_id == str(user_id)
+            ]
+            if not owned:
+                raise InvalidConfigurationError("취소할 본인의 수정 요청이 없습니다.")
+            repository.cancel_change_request(owned[-1])
+        await self.refresh_document_review(review_id)
+        await self._try_approve(review_id)
+
+    async def refresh_document_review(self, review_id: int) -> None:
+        """Render current persisted state into the primary Discord message."""
+        with session_scope(self._session_factory) as session:
+            repository = ReviewThreadRepository(session)
+            review = self._require_document_review(repository, review_id)
+            completions = repository.list_completions(review_id)
+            open_requests = repository.list_change_requests(
+                review_id, ("OPEN", "UPDATED")
+            )
+            reviewers = ReviewerRepository(session).list_for_project(review.project_id)
+            content = self._document_status_text(
+                review, reviewers, completions, len(open_requests)
+            )
+            thread_id = int(review.discord_thread_id)
+            message_id = (
+                int(review.checklist_message_id)
+                if review.checklist_message_id
+                else None
+            )
+        thread = self._discord_service.get_thread(thread_id)
+        view = self.document_review_view(review_id)
+        if message_id is None:
+            message = await self._discord_service.send_thread_controls(
+                thread, content, view
+            )
+            with session_scope(self._session_factory) as session:
+                review = ReviewThreadRepository(session).find_by_id(review_id)
+                if review is not None:
+                    review.checklist_message_id = str(message.id)
+        else:
+            await self._discord_service.edit_thread_controls(
+                thread, message_id, content, view
+            )
+
+    def document_review_view(self, review_id: int) -> discord.ui.View:
+        """Construct a persistent View without creating an import cycle."""
+        from app.bot.document_review_views import DocumentReviewView
+
+        return DocumentReviewView(self, review_id)
+
+    async def _send_document_controls(
+        self, review_id: int, thread: discord.Thread
+    ) -> None:
+        message = await self._discord_service.send_thread_controls(
+            thread,
+            "📋 **문서 리뷰**\n상태: 기준 설정 필요\n\n"
+            "담당자가 일반 문서(1명) 또는 전체 팀 문서(3명)를 선택해주세요.",
+            self.document_review_view(review_id),
+        )
+        with session_scope(self._session_factory) as session:
+            review = ReviewThreadRepository(session).find_by_id(review_id)
+            if review is not None:
+                review.checklist_message_id = str(message.id)
+
+    async def _try_approve(self, review_id: int) -> bool:
+        with session_scope(self._session_factory) as session:
+            repository = ReviewThreadRepository(session)
+            review = self._require_document_review(repository, review_id)
+            completions = repository.list_completions(review_id)
+            open_requests = repository.list_change_requests(
+                review_id, ("OPEN", "UPDATED")
+            )
+            if (
+                review.status == "APPROVED"
+                or review.required_review_count is None
+                or len(completions) < review.required_review_count
+                or open_requests
+            ):
+                return False
+            page_id = review.external_resource_id
+            reviewer_names = [item.display_name for item in completions]
+            thread_id = int(review.discord_thread_id)
+        if self._confluence is None:
+            self._logger.warning(
+                "Approval ready but Confluence outbound credentials are missing"
+            )
+            return False
+        await self._confluence.mark_approved(page_id, reviewer_names)
+        await self._confluence.add_comment(
+            page_id,
+            "[CollabNotify Approved]\n승인 기준을 충족했습니다.\n리뷰어: "
+            + ", ".join(reviewer_names),
+        )
+        with session_scope(self._session_factory) as session:
+            repository = ReviewThreadRepository(session)
+            review = self._require_document_review(repository, review_id)
+            repository.update_status(review, "APPROVED")
+        thread = self._discord_service.get_thread(thread_id)
+        await self._discord_service.send_thread_message(
+            thread,
+            "🎉 **Approved 승격**\n리뷰어: " + ", ".join(reviewer_names),
+        )
+        await self.refresh_document_review(review_id)
+        return True
+
+    @staticmethod
+    def _require_document_review(
+        repository: ReviewThreadRepository, review_id: int
+    ) -> ReviewThread:
+        review = repository.find_by_id(review_id)
+        if review is None or review.service != ServiceType.CONFLUENCE.value:
+            raise InvalidConfigurationError("등록된 Confluence 리뷰가 아닙니다.")
+        if review.status in {"COMPLETED", "CANCELLED"}:
+            raise InvalidConfigurationError("종료된 문서 리뷰입니다.")
+        return review
+
+    @staticmethod
+    def _require_reviewer(session: Session, review: ReviewThread, user_id: int) -> None:
+        reviewers = ReviewerRepository(session).list_for_project(review.project_id)
+        if str(user_id) not in {item.discord_user_id for item in reviewers}:
+            raise InvalidConfigurationError(
+                "이 프로젝트의 지정 리뷰어만 사용할 수 있습니다."
+            )
+
+    @staticmethod
+    def _document_status_text(
+        review: ReviewThread,
+        reviewers: list[object],
+        completions: list[object],
+        open_request_count: int,
+    ) -> str:
+        completed = {str(item.discord_user_id): item for item in completions}
+        required = (
+            str(review.required_review_count)
+            if review.required_review_count
+            else "미설정"
+        )
+        lines = [
+            "📋 **문서 리뷰**",
+            f"상태: {REVIEW_STATUS_LABELS.get(review.status, review.status)}",
+            f"승인 기준: {required}명",
+            f"리뷰 현황: {len(completions)}/{required}명 완료",
+            f"열린 수정 요청: {open_request_count}건",
+            "",
+        ]
+        for reviewer in reviewers:
+            done = completed.get(str(reviewer.discord_user_id))
+            suffix = " ✅" if done else " ⬜"
+            lines.append(f"- <@{reviewer.discord_user_id}>{suffix}")
+        return "\n".join(lines)
 
     async def update_parent_message(
         self,

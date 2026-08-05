@@ -54,3 +54,38 @@ def test_review_thread_status_and_reviewer_history(db_session: Session) -> None:
     assert reviews.list_open(project.id) == [review]
     assert reviewer.enabled is True
     assert reviewers.remove(project.id, 100) is True
+
+
+def test_document_review_completion_and_change_request_lifecycle(
+    db_session: Session,
+) -> None:
+    """Document review actions remain idempotent and auditable."""
+    project = ProjectRepository(db_session).create("MA", "discord")
+    repository = ReviewThreadRepository(db_session)
+    review = repository.create(
+        project_id=project.id,
+        service="confluence",
+        event_type="page_created",
+        external_resource_id="2162857",
+        discord_message_id="200",
+        discord_thread_id="300",
+        title="문서 리뷰",
+    )
+    repository.configure(review, 1)
+
+    completion, created = repository.add_completion(review, 100, "지유")
+    duplicate, duplicate_created = repository.add_completion(review, 100, "지유")
+    request = repository.create_change_request(
+        review, 100, "지유", "문구 수정", "표현을 명확히 해주세요.", "2장"
+    )
+
+    assert created is True
+    assert duplicate_created is False
+    assert duplicate.id == completion.id
+    assert repository.list_completions(review.id) == [completion]
+    assert repository.list_change_requests(review.id, ("OPEN",)) == [request]
+
+    repository.resolve_change_request(request)
+
+    assert request.status == "RESOLVED"
+    assert request.resolved_at is not None

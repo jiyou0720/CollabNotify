@@ -15,10 +15,12 @@ def test_model_metadata_contains_all_documented_tables() -> None:
 
     assert set(inspect(engine).get_table_names()) == {
         "channel_mappings",
+        "change_requests",
         "error_logs",
         "notification_logs",
         "projects",
         "project_aliases",
+        "review_completions",
         "review_statuses",
         "review_threads",
         "reviewer_mappings",

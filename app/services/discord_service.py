@@ -119,6 +119,30 @@ class DiscordService:
             allowed_mentions=discord.AllowedMentions.none(),
         )
 
+    @staticmethod
+    async def send_thread_controls(
+        thread: discord.Thread, content: str, view: discord.ui.View
+    ) -> discord.Message:
+        """Post an interactive workflow message with safe user mentions."""
+        return await thread.send(
+            content,
+            view=view,
+            allowed_mentions=discord.AllowedMentions(
+                everyone=False, users=True, roles=False, replied_user=False
+            ),
+        )
+
+    @staticmethod
+    async def edit_thread_controls(
+        thread: discord.Thread,
+        message_id: int,
+        content: str,
+        view: discord.ui.View,
+    ) -> discord.Message:
+        """Refresh an existing workflow message."""
+        message = await thread.fetch_message(message_id)
+        return await message.edit(content=content, view=view)
+
     def get_thread(self, thread_id: int) -> discord.Thread:
         """Resolve a review thread from the Discord channel cache."""
         channel = self._channel_service.get_channel(thread_id)

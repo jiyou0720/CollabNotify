@@ -6,6 +6,7 @@ import logging
 
 import discord
 from discord import app_commands
+from discord.ext import tasks
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.bot.admin_commands import AdminCommandGroup
@@ -51,23 +52,36 @@ class DiscordClient(discord.Client):
                     ProjectAliasService(session_factory),
                 )
             )
-            self.tree.add_command(
-                ReviewCommandGroup(
-                    ReviewThreadService(session_factory, discord_service)
-                )
-            )
+            self.review_service = ReviewThreadService(session_factory, discord_service)
+            self.tree.add_command(ReviewCommandGroup(self.review_service))
             self.tree.add_command(AdminCommandGroup(administration_service))
             self.tree.add_command(SettingsCommandGroup(administration_service))
             self.tree.add_command(TestCommandGroup())
 
     async def setup_hook(self) -> None:
         """Synchronize registered commands before the client becomes ready."""
+        review_service = getattr(self, "review_service", None)
+        if review_service is not None:
+            review_service.restore_document_review_views(self)
+            self.review_reminder_loop.start()
         if self.config.guild_id is not None:
             guild = discord.Object(id=self.config.guild_id)
             self.tree.copy_global_to(guild=guild)
             await self.tree.sync(guild=guild)
         else:
             await self.tree.sync()
+
+    @tasks.loop(hours=1)
+    async def review_reminder_loop(self) -> None:
+        """Run persisted document review and change-request reminders."""
+        review_service = getattr(self, "review_service", None)
+        if review_service is not None:
+            await review_service.send_due_reminders()
+
+    @review_reminder_loop.before_loop
+    async def before_review_reminders(self) -> None:
+        """Wait until Discord channel state is ready."""
+        await self.wait_until_ready()
 
 
 class DiscordBotApplication:

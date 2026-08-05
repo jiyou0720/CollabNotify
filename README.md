@@ -373,3 +373,35 @@ GitHub, Jira, Confluence의 Thread 생성·조회·게시·보관은 공통 `Thr
 인터페이스와 `ReviewThreadService` 구현을 사용합니다. 새 provider는 webhook을
 `Notification`으로 정규화하고 동일한 lifecycle 메타데이터만 제공하면 이 구조를
 재사용할 수 있습니다.
+
+## Confluence Cloud 문서 리뷰 워크플로우
+
+신규 문서(`page_created`)가 Discord에 전달되면 리뷰 스레드에 다음 영구 버튼이
+생성됩니다.
+
+- 일반 문서(1명) / 전체 팀 문서(3명) 승인 기준 설정
+- 리뷰 완료 및 Confluence 감사 댓글
+- 수정 요청 모달, 요청 취소, 요청자의 수정 확인 완료
+- `page_updated` 감지 후 요청자 스레드 멘션
+- 리뷰 및 수정 요청 리마인더
+- 기준 충족 및 열린 수정 요청 0건일 때 `approved` 라벨과
+  `collabnotify.review` content property 기록
+
+Confluence Cloud 양방향 쓰기를 위해 아래 환경 변수가 필요합니다.
+
+```env
+CONFLUENCE_BASE_URL=https://jehye.atlassian.net
+CONFLUENCE_EMAIL=atlassian-account@example.com
+CONFLUENCE_API_TOKEN=your-atlassian-api-token
+REVIEW_REMINDER_HOURS=48
+CHANGE_REQUEST_REMINDER_HOURS=48
+```
+
+Atlassian Automation webhook 주소:
+
+```text
+https://<cloudflared-public-host>/api/v1/webhook/confluence
+```
+
+요청 헤더에는 `X-Webhook-Secret: <CONFLUENCE_WEBHOOK_SECRET>`가 필요합니다.
+로컬 서버는 `uvicorn app.main:app --host 0.0.0.0 --port 8000`으로 실행합니다.
