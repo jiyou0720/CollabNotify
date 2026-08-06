@@ -1226,5 +1226,6 @@ class ReviewThreadService:
         """Return whether a missing append mapping should bootstrap a thread."""
         return (
             notification.service is ServiceType.CONFLUENCE
-            and notification.event_type == "page_updated"
+            and notification.event_type
+            in {"page_updated", "comment_created", "attachment_created"}
         )

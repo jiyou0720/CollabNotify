@@ -127,7 +127,8 @@ class NotificationCoordinator:
             )
             try:
                 message = None
-                if notification.parent_delivery:
+                bootstrap_parent = self._should_bootstrap_parent(notification)
+                if notification.parent_delivery or bootstrap_parent:
                     message = await delivery.send(
                         channel_id,
                         notification,
@@ -178,6 +179,21 @@ class NotificationCoordinator:
                 session.commit()
                 raise
         return True
+
+    def _should_bootstrap_parent(self, notification: Notification) -> bool:
+        """Create a parent card when the first observed page event is not creation."""
+        resource_id = notification.external_resource_id
+        if (
+            notification.service is not ServiceType.CONFLUENCE
+            or notification.event_type
+            not in {"page_updated", "comment_created", "attachment_created"}
+            or not resource_id
+        ):
+            return False
+        return (
+            self._review_threads.find_thread(notification.service.value, resource_id)
+            is None
+        )
 
     def _claim_delivery(
         self,

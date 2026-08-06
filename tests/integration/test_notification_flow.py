@@ -529,3 +529,77 @@ async def test_confluence_page_uses_one_parent_embed_and_thread(
         assert review is not None
         assert review.discord_thread_id == "701"
         assert review.status == "COMPLETED"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("event_type", "payload"),
+    [
+        (
+            "page_updated",
+            {
+                "page": {
+                    "id": "legacy-10",
+                    "title": "Legacy Architecture",
+                    "version": {"number": 2},
+                },
+                "space": {"name": "Development"},
+                "user": {"displayName": "Editor"},
+            },
+        ),
+        (
+            "comment_created",
+            {
+                "page": {"id": "legacy-10", "title": "Legacy Architecture"},
+                "comment": {"body": "첫 번째로 감지된 댓글"},
+                "space": {"name": "Development"},
+                "user": {"displayName": "Reviewer"},
+            },
+        ),
+    ],
+)
+async def test_first_legacy_page_activity_creates_parent_card_and_linked_thread(
+    db_session: Session,
+    event_type: str,
+    payload: dict[str, object],
+) -> None:
+    """A first update or comment must not create an orphan standalone thread."""
+    seed_mapping(db_session, "confluence", "Development", "103")
+    factory = create_session_factory(db_session.get_bind())
+    parent_message = Mock(spec=discord.Message)
+    parent_message.id = 800
+    controls_message = Mock(spec=discord.Message)
+    controls_message.id = 802
+    thread = Mock(spec=discord.Thread)
+    thread.id = 801
+    discord_service = Mock(spec=DiscordService)
+    discord_service.send_embed = AsyncMock(return_value=parent_message)
+    discord_service.create_thread = AsyncMock(return_value=thread)
+    discord_service.create_channel_thread = AsyncMock()
+    discord_service.send_thread_controls = AsyncMock(return_value=controls_message)
+    discord_service.send_thread_message = AsyncMock()
+    discord_service.get_thread.return_value = thread
+    get_event_dispatcher.cache_clear()
+    service = WebhookService(
+        get_event_dispatcher(), NotificationCoordinator(factory, discord_service)
+    )
+
+    result = await service.process(
+        ServiceType.CONFLUENCE,
+        event_type,
+        payload,
+        f"cf-{event_type}-legacy-10",
+    )
+
+    assert result.supported is True
+    discord_service.send_embed.assert_awaited_once()
+    discord_service.create_thread.assert_awaited_once()
+    assert discord_service.create_thread.await_args.args[0] is parent_message
+    discord_service.create_channel_thread.assert_not_awaited()
+    with factory() as session:
+        review = ReviewThreadRepository(session).find_by_resource(
+            "confluence", "legacy-10"
+        )
+        assert review is not None
+        assert review.discord_message_id == "800"
+        assert review.discord_thread_id == "801"
