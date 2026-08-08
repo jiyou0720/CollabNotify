@@ -40,6 +40,19 @@ def test_database_preserves_explicit_url() -> None:
     assert configure_persistent_database(environment) == "sqlite:///custom.db"
 
 
+def test_database_prepares_explicit_dishost_data_directory() -> None:
+    environment = {
+        "DATABASE_URL": "sqlite:////home/container/data/collabnotify.db",
+        "DISHOST_DATA_DIR": "/home/container/data",
+    }
+
+    with patch("app.hosting.dishost.Path.mkdir") as mkdir:
+        result = configure_persistent_database(environment)
+
+    assert result == environment["DATABASE_URL"]
+    mkdir.assert_called_once_with(parents=True, exist_ok=True)
+
+
 def test_ngrok_settings_return_managed_agent_path() -> None:
     token = "secret-token"
     settings = ngrok_settings(

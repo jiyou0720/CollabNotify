@@ -38,12 +38,16 @@ def allocation_port(environment: dict[str, str] | None = None) -> int:
 def configure_persistent_database(environment: dict[str, str] | None = None) -> str:
     """Set a persistent SQLite URL when DATABASE_URL was not supplied."""
     values = os.environ if environment is None else environment
+    data_directory = values.get("DISHOST_DATA_DIR", "").strip()
+    if data_directory:
+        Path(data_directory).mkdir(parents=True, exist_ok=True)
     configured = values.get("DATABASE_URL", "").strip()
     if configured:
         return configured
 
-    container_root = Path(values.get("DISHOST_DATA_DIR", "/home/container/data"))
-    container_root.mkdir(parents=True, exist_ok=True)
+    container_root = Path(data_directory or "/home/container/data")
+    if not data_directory:
+        container_root.mkdir(parents=True, exist_ok=True)
     database_url = f"sqlite:///{container_root.as_posix()}/collabnotify.db"
     values["DATABASE_URL"] = database_url
     return database_url
