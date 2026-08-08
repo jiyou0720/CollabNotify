@@ -5,6 +5,7 @@ SQLAlchemy==2.0.51
 alembic==1.18.5
 pydantic==2.13.4
 python-dotenv==1.2.2
+pyngrok==8.1.2
 pytest==9.1.1
 pytest-asyncio==1.4.0
 pytest-cov==7.1.0
